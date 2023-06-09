@@ -18,8 +18,11 @@ use axum::{
 use futures::StreamExt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use axum::body::StreamBody;
+use axum::http::header;
 use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
 use warg_api::v1::package::{
     ContentSource, PackageError, PackageRecord, PackageRecordState, PublishRecordRequest,
 };
@@ -63,10 +66,8 @@ impl Config {
         Router::new()
             .route("/:log_id/record", post(publish_record))
             .route("/:log_id/record/:record_id", get(get_record))
-            .route(
-                "/:log_id/record/:record_id/content/:digest",
-                post(upload_content),
-            )
+            .route("/:log_id/record/:record_id/content/:digest", post(upload_content))
+            .route("/:log_id/record/:record_id/content/:digest", get(fetch_content))
             .with_state(self)
     }
 
@@ -82,11 +83,13 @@ impl Config {
         self.files_dir.join(self.content_file_name(digest))
     }
 
-    fn content_url(&self, digest: &AnyHash) -> String {
+    fn content_url(&self,
+                   log_id: &LogId,
+                   record_id: &RecordId,
+                   digest: &AnyHash) -> String {
         format!(
-            "{url}/content/{name}",
+            "{url}/{log_id}/record/{record_id}/content/{digest}",
             url = self.base_url,
-            name = self.content_file_name(digest)
         )
     }
 }
@@ -112,6 +115,13 @@ impl PackageApiError {
     fn unsupported(message: impl ToString) -> Self {
         Self(PackageError::Message {
             status: StatusCode::NOT_IMPLEMENTED.as_u16(),
+            message: message.to_string(),
+        })
+    }
+
+    fn not_found(message: impl ToString) -> Self {
+        Self(PackageError::Message {
+            status: StatusCode::NOT_FOUND.as_u16(),
             message: message.to_string(),
         })
     }
@@ -217,7 +227,7 @@ async fn publish_record(
     if missing.is_empty() {
         config
             .core_service
-            .submit_package_record(log_id, record_id.clone())
+            .submit_package_record(log_id.clone(), record_id.clone())
             .await;
 
         return Ok((
@@ -277,7 +287,7 @@ async fn get_record(
                     (
                         d.clone(),
                         vec![ContentSource::Http {
-                            url: config.content_url(d),
+                            url: config.content_url(&log_id, &record_id, d),
                         }],
                     )
                 })
@@ -359,13 +369,13 @@ async fn upload_content(
     {
         config
             .core_service
-            .submit_package_record(log_id, record_id.clone())
+            .submit_package_record(log_id.clone(), record_id.clone())
             .await;
     }
 
     Ok((
         StatusCode::CREATED,
-        [(axum::http::header::LOCATION, config.content_url(&digest))],
+        [(header::LOCATION, config.content_url(&log_id, &record_id, &digest))],
     ))
 }
 
@@ -411,4 +421,28 @@ async fn process_content(
     }
 
     Ok(())
+}
+
+#[debug_handler]
+async fn fetch_content(
+    State(config): State<Config>,
+    Path((_log_id, _record_id, digest)): Path<(LogId, RecordId, AnyHash)>,
+) -> Result<impl IntoResponse, PackageApiError> {
+    let file = match tokio::fs::File::open(config.content_path(&digest)).await {
+        Ok(file) => file,
+        Err(_err) => return Err(PackageApiError::not_found(format!("content with digest `{digest}` not found"))),
+    };
+
+    // convert the `AsyncRead` into a `Stream`
+    let stream = ReaderStream::new(file);
+    // convert the `Stream` into an `axum::body::HttpBody`
+    let body = StreamBody::new(stream);
+
+    let disposition = &format!("attachment; filename=\"{digest}\"", digest = digest.clone());
+    let headers = [
+        (header::CONTENT_TYPE, "application/wasm; charset=utf-8"),
+        (header::CONTENT_DISPOSITION, &String::from(disposition)),
+    ];
+
+    Ok((headers, body).into_response())
 }
