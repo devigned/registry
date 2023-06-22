@@ -74,6 +74,7 @@ struct State {
     packages: HashMap<LogId, Log<package::Validator, package::PackageRecord>>,
     checkpoints: IndexMap<AnyHash, SerdeEnvelope<MapCheckpoint>>,
     records: HashMap<LogId, HashMap<RecordId, RecordStatus>>,
+    names: HashMap<LogId, PackageId>,
 }
 
 fn get_records_before_checkpoint(indices: &[usize], checkpoint_index: usize) -> usize {
@@ -211,7 +212,7 @@ impl DataStore for MemoryDataStore {
     async fn store_package_record(
         &self,
         log_id: &LogId,
-        _package_id: &PackageId,
+        package_id: &PackageId,
         record_id: &RecordId,
         record: &ProtoEnvelope<package::PackageRecord>,
         missing: &HashSet<&AnyHash>,
@@ -224,6 +225,7 @@ impl DataStore for MemoryDataStore {
         });
 
         let mut state = self.0.write().await;
+        state.names.entry(log_id.clone()).or_insert_with(|| package_id.clone());
         let prev = state.records.entry(log_id.clone()).or_default().insert(
             record_id.clone(),
             RecordStatus::Pending(PendingRecord::Package {
@@ -577,6 +579,16 @@ impl DataStore for MemoryDataStore {
             envelope,
             checkpoint,
         })
+    }
+
+    async fn get_package_id(&self, log_id: &LogId) -> Result<PackageId, DataStoreError> {
+        self.0
+            .read()
+            .await
+            .names
+            .get(log_id)
+            .map(|package_id| package_id.clone())
+            .ok_or_else(|| DataStoreError::LogNotFound(log_id.clone()))
     }
 
     async fn verify_package_record_signature(

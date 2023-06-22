@@ -11,6 +11,7 @@ use tower_http::{
     LatencyUnit,
 };
 use tracing::{Level, Span};
+use crate::contentstore::ContentStore;
 
 pub mod v1;
 
@@ -19,9 +20,9 @@ pub fn create_router(
     base_url: String,
     core: Arc<CoreService>,
     temp_dir: PathBuf,
-    files_dir: PathBuf,
     content_policy: Option<Arc<dyn ContentPolicy>>,
     record_policy: Option<Arc<dyn RecordPolicy>>,
+    content_store: Arc<dyn ContentStore>,
 ) -> Router {
     Router::new()
         .nest(
@@ -30,9 +31,9 @@ pub fn create_router(
                 base_url,
                 core,
                 temp_dir,
-                files_dir.clone(),
                 content_policy,
                 record_policy,
+                content_store,
             ),
         )
         .layer(
